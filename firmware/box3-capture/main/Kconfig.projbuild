@@ -1,0 +1,63 @@
+menu "Capture firmware configuration"
+
+    config CAPTURE_WIFI_SSID
+        string "WiFi SSID"
+        default "my-network"
+
+    config CAPTURE_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+
+    config CAPTURE_ENDPOINT
+        string "Capture endpoint URL"
+        default "https://cogneuro-alexa.vercel.app/api/capture"
+        help
+            Full URL of the ingest endpoint. Query parameters are appended by the firmware.
+
+    config CAPTURE_DEVICE_KEY
+        string "Device key"
+        default ""
+        help
+            Must match DEVICE_KEY on the server. Sent as the X-Device-Key header.
+
+    config CAPTURE_SECONDS
+        int "Seconds to record per capture"
+        default 5
+        range 1 60
+
+    config CAPTURE_SAMPLE_RATE
+        int "Sample rate (Hz)"
+        default 16000
+
+    config CAPTURE_MIC_CHANNELS
+        int "Channels to read from the ES7210"
+        default 2
+        range 1 4
+        help
+            The BOX-3's ES7210 exposes two microphones plus two echo-reference
+            channels. Two is the pair of mics. If captures come back silent or
+            sound like noise, this is the first knob to try.
+
+    config CAPTURE_SEND_MONO
+        bool "Extract channel 0 and send mono"
+        default y
+        help
+            The eventual Whisper pipeline wants mono, so this is the honest test.
+            Turn it off to send every channel interleaved and hear each mic
+            separately on the review page.
+
+    config CAPTURE_MIC_GAIN_DB
+        int "Microphone gain (dB)"
+        default 30
+        range 0 60
+
+    config CAPTURE_TRIGGER_WAKE_WORD
+        bool "Trigger captures with the on-device wake word"
+        default n
+        help
+            Scaffolding only, and deliberately off. See wake_word.c for the
+            integration points. Prove the button path first: if a capture looks
+            wrong with the wake word enabled, the mic, the gain, the endpointing
+            and the detector are all suspects at once.
+
+endmenu
