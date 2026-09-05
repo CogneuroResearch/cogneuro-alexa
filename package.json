@@ -1,0 +1,18 @@
+{
+  "name": "cogneuro-alexa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capture-review test page: listen to what the ESP32-S3-BOX-3 actually recorded",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "post-test": "node scripts/post-test-capture.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.8.0",
+    "next": "^16.3.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}
