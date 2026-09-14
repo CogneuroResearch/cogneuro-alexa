@@ -16,3 +16,6 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # Default 1MB app partition overflows; the N16R8 has 16MB flash.
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Resolve .local names (cogneuro-pi.local) through mDNS rather than DNS.
+CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y

@@ -51,6 +51,35 @@ menu "Capture firmware configuration"
         default 30
         range 0 60
 
+    config CAPTURE_ASSISTANT_MODE
+        bool "Talk to the assistant instead of the review page"
+        default n
+        help
+            Off: POST captures to the Vercel review page and play nothing.
+            That is the input-inspection harness and it stays useful.
+
+            On: POST to the Pi, which transcribes, thinks, and streams spoken
+            audio back to be played through the speaker.
+
+    config CAPTURE_ASSISTANT_ENDPOINT
+        string "Assistant endpoint URL"
+        depends on CAPTURE_ASSISTANT_MODE
+        default "http://cogneuro-pi.local:8080/talk?stream=1"
+        help
+            The Pi's /talk endpoint. Keep stream=1: the reply is played as it
+            arrives, so speech starts about two seconds in instead of after
+            the whole answer has been synthesized.
+
+            Resolving cogneuro-pi.local needs mDNS, which this firmware
+            initialises. An IP address works too but will move unless the
+            router has a DHCP reservation for the Pi.
+
+    config CAPTURE_SPEAKER_VOLUME
+        int "Speaker volume (percent)"
+        depends on CAPTURE_ASSISTANT_MODE
+        default 70
+        range 0 100
+
     config CAPTURE_TRIGGER_WAKE_WORD
         bool "Trigger captures with the on-device wake word"
         default n

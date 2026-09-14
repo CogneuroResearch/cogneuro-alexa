@@ -12,6 +12,7 @@
  */
 
 #include <string.h>
+#include <strings.h>
 #include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
@@ -27,7 +28,10 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
+
+#include "mdns.h"
 
 #include "bsp/esp-box-3.h"
 #include "esp_codec_dev.h"
@@ -47,6 +51,9 @@ static const char *TAG = "capture";
 static EventGroupHandle_t s_wifi_events;
 static SemaphoreHandle_t s_capture_request;
 static esp_codec_dev_handle_t s_mic;
+#if CONFIG_CAPTURE_ASSISTANT_MODE
+static esp_codec_dev_handle_t s_speaker;
+#endif
 static const char *s_trigger = "button";
 
 /* ------------------------------------------------------------------ WiFi */
@@ -162,6 +169,7 @@ static void extract_channel0(int16_t *buf, size_t frames)
     }
 }
 
+#if !CONFIG_CAPTURE_ASSISTANT_MODE
 static void post_capture(const int16_t *pcm, size_t bytes, int channels)
 {
     char url[320];
@@ -228,6 +236,221 @@ static void post_capture(const int16_t *pcm, size_t bytes, int channels)
 
     esp_http_client_cleanup(client);
 }
+#endif /* !CONFIG_CAPTURE_ASSISTANT_MODE */
+
+#if CONFIG_CAPTURE_ASSISTANT_MODE
+
+/* ------------------------------------------------------------- Assistant */
+
+#define PLAY_CHUNK_BYTES 4096
+
+/*
+ * The speaker, like the microphone, is opened once and held.
+ *
+ * The BSP puts both on the same I2S peripheral and switches the rx channel
+ * to slave for full-duplex, so the two can be open together. Cycling either
+ * one is what caused the unbalanced-teardown bug; don't reintroduce it here.
+ */
+static esp_err_t speaker_start(void)
+{
+    s_speaker = bsp_audio_codec_speaker_init();
+    if (!s_speaker) {
+        ESP_LOGE(TAG, "speaker init failed");
+        return ESP_FAIL;
+    }
+
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .sample_rate = SAMPLE_RATE,
+    };
+    esp_err_t err = esp_codec_dev_open(s_speaker, &fs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "speaker open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    esp_codec_dev_set_out_vol(s_speaker, CONFIG_CAPTURE_SPEAKER_VOLUME);
+    ESP_LOGI(TAG, "speaker open and held: 1 ch, %d Hz, volume %d%%",
+             SAMPLE_RATE, CONFIG_CAPTURE_SPEAKER_VOLUME);
+    return ESP_OK;
+}
+
+/* Filled in by the header callback so the board can log what it heard and
+ * said, without anyone having to read the Pi's log. */
+static char s_heard[192];
+static char s_reply[256];
+static bool s_reply_is_audio;
+
+static esp_err_t assistant_http_event(esp_http_client_event_t *evt)
+{
+    if (evt->event_id != HTTP_EVENT_ON_HEADER) return ESP_OK;
+
+    if (strcasecmp(evt->header_key, "X-Heard") == 0) {
+        snprintf(s_heard, sizeof(s_heard), "%s", evt->header_value);
+    } else if (strcasecmp(evt->header_key, "X-Reply") == 0) {
+        snprintf(s_reply, sizeof(s_reply), "%s", evt->header_value);
+    } else if (strcasecmp(evt->header_key, "Content-Type") == 0) {
+        s_reply_is_audio = (strncasecmp(evt->header_value, "audio/", 6) == 0);
+    }
+    return ESP_OK;
+}
+
+/*
+ * Play the response body as it arrives.
+ *
+ * The Pi streams raw 16-bit mono PCM chunk by chunk: a short spoken
+ * acknowledgement first, then the answer in clause-sized pieces as the model
+ * produces them. Buffering the whole body before playing would throw away
+ * the entire point of that — first sound would go from under two seconds to
+ * over five.
+ *
+ * esp_codec_dev_write blocks until the samples are consumed, which paces the
+ * loop for free: reads only happen as fast as the speaker drains.
+ */
+static esp_err_t play_response(esp_http_client_handle_t client)
+{
+    uint8_t *chunk = heap_caps_malloc(PLAY_CHUNK_BYTES + 1, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+    if (!chunk) {
+        ESP_LOGE(TAG, "no memory for playback buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t total = 0;
+    bool have_carry = false;   /* a read can split a 16-bit sample in half */
+    uint8_t carry = 0;
+    int64_t first_at = 0;
+    int64_t started = esp_timer_get_time();
+    esp_err_t result = ESP_OK;
+
+    while (!esp_http_client_is_complete_data_received(client)) {
+        int offset = 0;
+        if (have_carry) {
+            chunk[0] = carry;
+            offset = 1;
+            have_carry = false;
+        }
+
+        int got = esp_http_client_read(client, (char *)chunk + offset,
+                                       PLAY_CHUNK_BYTES - offset);
+        if (got < 0) {
+            ESP_LOGE(TAG, "read failed after %u bytes", (unsigned)total);
+            result = ESP_FAIL;
+            break;
+        }
+        if (got == 0 && offset == 0) break;
+
+        int usable = got + offset;
+        if (usable & 1) {                 /* odd byte count: hold the tail */
+            carry = chunk[usable - 1];
+            have_carry = true;
+            usable -= 1;
+        }
+        if (usable <= 0) continue;
+
+        if (first_at == 0) {
+            first_at = esp_timer_get_time() - started;
+            ESP_LOGI(TAG, "first audio after %d ms", (int)(first_at / 1000));
+        }
+
+        esp_err_t err = esp_codec_dev_write(s_speaker, chunk, usable);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "speaker write failed: %s", esp_err_to_name(err));
+            result = err;
+            break;
+        }
+        total += usable;
+    }
+
+    free(chunk);
+    ESP_LOGI(TAG, "played %u bytes (%.1fs)",
+             (unsigned)total, (float)total / (SAMPLE_RATE * 2.0f));
+    return result;
+}
+
+static void exchange_with_assistant(const int16_t *pcm, size_t bytes)
+{
+    s_heard[0] = '\0';
+    s_reply[0] = '\0';
+    s_reply_is_audio = false;
+
+    esp_http_client_config_t cfg = {
+        .url = CONFIG_CAPTURE_ASSISTANT_ENDPOINT,
+        .method = HTTP_METHOD_POST,
+        .event_handler = assistant_http_event,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 30000,
+        .buffer_size_tx = 2048,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "http client init failed");
+        return;
+    }
+
+    esp_http_client_set_header(client, "Content-Type", "audio/l16");
+    esp_http_client_set_header(client, "X-Device-Key", CONFIG_CAPTURE_DEVICE_KEY);
+    char rate[16];
+    snprintf(rate, sizeof(rate), "%d", SAMPLE_RATE);
+    esp_http_client_set_header(client, "X-Sample-Rate", rate);
+
+    char rssi[16];
+    snprintf(rssi, sizeof(rssi), "%d", current_rssi());
+    esp_http_client_set_header(client, "X-RSSI", rssi);
+
+    esp_err_t err = esp_http_client_open(client, (int)bytes);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "connect to assistant failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    const char *cursor = (const char *)pcm;
+    size_t remaining = bytes;
+    while (remaining > 0) {
+        int written = esp_http_client_write(client, cursor,
+                                            (int)(remaining > 4096 ? 4096 : remaining));
+        if (written < 0) {
+            ESP_LOGE(TAG, "upload failed with %u bytes left", (unsigned)remaining);
+            esp_http_client_cleanup(client);
+            return;
+        }
+        cursor += written;
+        remaining -= written;
+    }
+
+    esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+
+    if (status != 200) {
+        char body[192] = { 0 };
+        int read = esp_http_client_read_response(client, body, sizeof(body) - 1);
+        if (read > 0) body[read] = '\0';
+        ESP_LOGE(TAG, "assistant returned %d: %s", status, body);
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    if (s_heard[0]) ESP_LOGI(TAG, "heard: %s", s_heard);
+
+    if (!s_reply_is_audio) {
+        /* The Pi answers with JSON when it heard nothing worth sending on. */
+        char body[192] = { 0 };
+        int read = esp_http_client_read_response(client, body, sizeof(body) - 1);
+        if (read > 0) body[read] = '\0';
+        ESP_LOGW(TAG, "no audio in reply: %s", body);
+        esp_http_client_cleanup(client);
+        return;
+    }
+
+    play_response(client);
+    if (s_reply[0]) ESP_LOGI(TAG, "said: %s", s_reply);
+
+    esp_http_client_cleanup(client);
+}
+
+#endif /* CONFIG_CAPTURE_ASSISTANT_MODE */
 
 static void capture_task(void *arg)
 {
@@ -256,9 +479,18 @@ static void capture_task(void *arg)
 
 #if CONFIG_CAPTURE_SEND_MONO
         extract_channel0(buf, frames);
-        post_capture(buf, frames * sizeof(int16_t), 1);
+        const size_t send_bytes = frames * sizeof(int16_t);
+        const int send_channels = 1;
 #else
-        post_capture(buf, raw_bytes, MIC_CHANNELS);
+        const size_t send_bytes = raw_bytes;
+        const int send_channels = MIC_CHANNELS;
+#endif
+
+#if CONFIG_CAPTURE_ASSISTANT_MODE
+        (void)send_channels;
+        exchange_with_assistant(buf, send_bytes);
+#else
+        post_capture(buf, send_bytes, send_channels);
 #endif
     }
 }
@@ -317,6 +549,19 @@ void app_main(void)
         return;
     }
     if (mic_start() != ESP_OK) return;
+
+#if CONFIG_CAPTURE_ASSISTANT_MODE
+    /* lwIP hands .local lookups to mDNS once this is up, so the endpoint can
+     * name the Pi rather than an address that moves with the DHCP lease. */
+    esp_err_t mdns_err = mdns_init();
+    if (mdns_err != ESP_OK) {
+        ESP_LOGW(TAG, "mdns_init failed (%s) — .local names will not resolve",
+                 esp_err_to_name(mdns_err));
+    }
+
+    if (speaker_start() != ESP_OK) return;
+    ESP_LOGI(TAG, "assistant endpoint: %s", CONFIG_CAPTURE_ASSISTANT_ENDPOINT);
+#endif
 
     xTaskCreate(capture_task, "capture", 6144, NULL, 5, NULL);
     buttons_start();
