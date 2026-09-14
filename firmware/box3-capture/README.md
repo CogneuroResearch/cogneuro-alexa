@@ -80,3 +80,124 @@ The review page shows peak level per clip, which narrows this quickly:
 button path is trusted means a bad capture could be the mic, the gain, the
 endpointing, or the detector, all at once. The button path answers the mic
 question first.
+
+---
+
+## Field notes (14 Sept 2026)
+
+Things that cost real time and are not obvious from the code.
+
+### Which button works is not stable
+
+BSP enum: `BSP_BUTTON_CONFIG = 0` (BOOT, GPIO0), `BSP_BUTTON_MUTE = 1`,
+`BSP_BUTTON_MAIN = 2` (touchscreen — skipped, the display is never started,
+so a **black screen is expected, not a fault**).
+
+On 8 Sept the **mute** button triggered captures and BOOT appeared dead.
+After a reflash on 14 Sept this **reversed**: BOOT worked, mute did nothing.
+No code changed in between. This has now cost an hour twice over.
+
+Diagnose it rather than hunting for the live button each session: log the
+`count` returned by `bsp_iot_button_create()` and the return value of each
+`iot_button_register_cb()`, and see what the BSP actually finds.
+
+Physical layout: the top edge is indicator LED (left), mute (middle), power
+(right). BOOT and RST are on the **bottom** edge either side of the USB-C.
+
+### The serial port name changes with the USB port
+
+`/dev/cu.usbmodem2101` on one port, `/dev/cu.usbmodem101` on another. A wrong
+name fails at the flash step with a generic
+`CMake Error at run_serial_tool.cmake:67 ... failed`, with the real error
+buried in `build/log/idf_py_stderr_output_*`. Always check first:
+
+```bash
+ls /dev/cu.*
+```
+
+Flash and power through the **main box's own USB-C** on the bottom edge.
+BOX-3-DOCK's Type-C is 5V input only and will not enumerate.
+
+### The SSID is compiled in
+
+WiFi credentials live in `sdkconfig` (gitignored) and are baked in at flash
+time, so **moving the board to a different network means `idf.py menuconfig`
+and a reflash** — unlike the Pi, it cannot be changed over the air. Worth
+remembering before assuming the board is broken in a new location.
+
+### The monitor holds the port
+
+An open `idf.py monitor` in another tab makes the next `flash` fail with
+"port is busy". Quit it with `Ctrl-]` first. A successful reflash is
+confirmed by log timestamps restarting from zero. The monitor window is a
+serial console, not a shell — typing into it does nothing, because this
+firmware never reads UART input.
+
+### The capture semaphore queues one extra press
+
+It is binary: a second press *during* a recording fires another 5-second
+capture the moment the first posts. In the log that is two captures
+milliseconds apart; on the review page it is a mysteriously silent clip.
+Not a fault.
+
+### Mic gain: 28 dB, box away from the wall
+
+| Gain | Distance | Result |
+|---|---|---|
+| 30 dB | handheld ~10cm | clipping |
+| 15 dB | handheld ~10cm | clean, peak 14% |
+| 22 dB | table 50–80cm | intelligible but "a bit distant" |
+| **28 dB** | table, away from the wall | **good — settled here** |
+
+The placement change probably mattered more than the gain. Gain multiplies
+voice and room reflections equally, so it cannot fix "distant and boxy" —
+that is a direct-to-reverberant problem, and the box had been sitting on a
+hard table with a wall close behind.
+
+Calibration had to be done **by ear**: the review page's `peak` metric
+measures the codec-open transient rather than the speech, so it reads 100%
+regardless of gain. Don't trust it until that is fixed.
+
+The remaining lever for presence is not gain — `extract_channel0()` discards
+the second mic, so the array currently gains nothing. Feeding both channels
+through the esp-sr AFE is the real fix, and lands with the wake word.
+
+## Known bugs, in the order they matter
+
+1. **Codec ownership / asymmetric teardown.** `i2s_channel_disable(1378):
+   the channel has not been enabled yet` fires at ERROR level on the second
+   and later captures. `record()` opens and closes the codec per capture and
+   the teardown is not symmetric. Harmless today — captures either side of
+   it post normally — but **fix this before adding playback or the wake
+   word**, both of which introduce a second owner of the codec handle. This
+   is exactly what `wake_word.c` warns about.
+
+2. **Codec-open transient.** Every capture begins with a full-scale spike
+   from `esp_codec_dev_open`. Discard the first ~50 ms. (`brain/speech.py`
+   already trims it server-side.)
+
+3. **Empty `server said:`.** The response body is never read — likely a
+   chunked response with `content_length == -1` — so the line prints
+   regardless of status code. A rejected POST looks identical to an accepted
+   one, which makes auth failures invisible. Worth fixing.
+
+4. **Only channel 0 is used.** See the gain note above.
+
+## Next: talk to the Pi
+
+The board currently POSTs to the Vercel review page, which was only ever an
+input-inspection harness. The pipeline now lives on the Pi:
+
+```
+POST http://cogneuro-pi.local:8080/talk?stream=1
+Content-Type: audio/wav        (or raw PCM; send X-Sample-Rate)
+-> chunked raw 16-bit PCM @ 16kHz mono, to play through the ES8311
+```
+
+Response headers carry `X-Sample-Rate`, `X-Channels`, `X-Bits`. Audio starts
+arriving roughly 1.8s in (a short spoken acknowledgement while the model
+thinks), so play chunks as they arrive rather than buffering the whole
+reply — buffering throws away the entire point of the streaming endpoint.
+
+After that: endpointing (VAD) so a turn ends when the speaker stops, instead
+of the fixed 5-second window. See `brain/README.md`.
