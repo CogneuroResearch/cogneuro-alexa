@@ -257,7 +257,7 @@ static void buttons_start(void)
 
     for (int i = 0; i < count && i < BSP_BUTTON_NUM; i++) {
         if (i == BSP_BUTTON_MAIN || btns[i] == NULL) continue;
-        iot_button_register_cb(btns[i], BUTTON_SINGLE_CLICK, NULL, on_button, NULL);
+        iot_button_register_cb(btns[i], BUTTON_SINGLE_CLICK, on_button, NULL);
     }
     ESP_LOGI(TAG, "press either physical button to capture");
 }
