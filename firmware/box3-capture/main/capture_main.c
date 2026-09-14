@@ -99,7 +99,28 @@ static int current_rssi(void)
 
 /* --------------------------------------------------------------- Capture */
 
-static esp_err_t record(int16_t *dst, size_t frames)
+/*
+ * The microphone is opened once and left open for the life of the firmware.
+ *
+ * It used to be opened and closed around every capture, which produced
+ *
+ *     E i2s_common: i2s_channel_disable(1378): the channel has not been
+ *                   enabled yet
+ *
+ * on the second and every subsequent capture: the close disables an I2S
+ * channel that the previous cycle had already left disabled, so open/close
+ * were not symmetric. Captures still worked, which is why it sat as a
+ * cosmetic annoyance for a week.
+ *
+ * It stops being cosmetic the moment anything else wants the codec. Playback
+ * needs it, and the esp-sr AFE behind the wake word holds it open
+ * continuously — two owners of one handle with an unbalanced close between
+ * them is a real bug waiting for a bad day.
+ *
+ * Holding it open costs a little idle power and nothing else, and it is what
+ * the wake word will need anyway.
+ */
+static esp_err_t mic_start(void)
 {
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
@@ -112,14 +133,23 @@ static esp_err_t record(int16_t *dst, size_t frames)
         ESP_LOGE(TAG, "codec open failed: %s", esp_err_to_name(err));
         return err;
     }
-    esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_CAPTURE_MIC_GAIN_DB);
 
+    err = esp_codec_dev_set_in_gain(s_mic, (float)CONFIG_CAPTURE_MIC_GAIN_DB);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not set gain: %s", esp_err_to_name(err));
+    }
+
+    ESP_LOGI(TAG, "mic open and held: %d ch, %d Hz, gain %d dB",
+             MIC_CHANNELS, SAMPLE_RATE, CONFIG_CAPTURE_MIC_GAIN_DB);
+    return ESP_OK;
+}
+
+static esp_err_t record(int16_t *dst, size_t frames)
+{
     /* esp_codec_dev_read blocks until the buffer is full, so one call is the
      * whole window. Reading in chunks would only add places to go wrong. */
     int bytes = (int)(frames * MIC_CHANNELS * sizeof(int16_t));
-    err = esp_codec_dev_read(s_mic, dst, bytes);
-    esp_codec_dev_close(s_mic);
-
+    esp_err_t err = esp_codec_dev_read(s_mic, dst, bytes);
     if (err != ESP_OK) ESP_LOGE(TAG, "codec read failed: %s", esp_err_to_name(err));
     return err;
 }
@@ -286,6 +316,7 @@ void app_main(void)
         ESP_LOGE(TAG, "microphone init failed");
         return;
     }
+    if (mic_start() != ESP_OK) return;
 
     xTaskCreate(capture_task, "capture", 6144, NULL, 5, NULL);
     buttons_start();
