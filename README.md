@@ -1,7 +1,69 @@
-# cogneuro-alexa — capture review
+# cogneuro-alexa
+
+A self-hosted voice assistant that supports real spoken dialog with an LLM,
+built to discuss and update a Linear to-do list over breakfast. Not a
+command-and-response box: it keeps conversation history across turns and
+calls tools to do real work.
+
+## What is in this repo
+
+| Path | What it is | Runs on |
+|---|---|---|
+| `brain/` | Conversation loop, tools, and the speech server | Raspberry Pi 5 |
+| `firmware/box3-capture/` | ESP-IDF firmware for the ESP32-S3-BOX-3 | the board |
+| `app/`, `lib/`, `scripts/` | Capture review page (Next.js, documented below) | Vercel |
+
+**Start at [`brain/README.md`](brain/README.md)** — it covers the running
+system, how to set the Pi up, the measurements behind the design choices,
+and the traps.
+
+## How it fits together
+
+```
+ESP32-S3-BOX-3                     Raspberry Pi 5 (one process)
+  button (wake word later)  --HTTP-->  Whisper base.en
+  records audio                        conversation loop + tool calling
+  plays the reply           <--PCM---  Piper
+                                          |
+                                       LLM API (provider-abstracted)
+                                       Linear GraphQL, Open-Meteo
+```
+
+**Wyoming is deliberately not used.** It exists so Home Assistant can talk to
+pluggable speech services; this project has its own orchestrator, which
+imports faster-whisper and Piper directly. Likewise ESPHome was rejected for
+the board: its voice-assistant component targets Home Assistant, so adopting
+it would mean running HA purely as a transport.
+
+## Status
+
+Working: capture firmware, mic calibration, the conversation loop with tool
+calling, and the full audio pipeline on the Pi (speech in, speech out).
+
+Next: point the firmware at the Pi and add playback, then endpointing (VAD)
+so a turn ends when you stop talking, then the on-device wake word. The
+codec-ownership bug in the firmware should be fixed *before* playback is
+added, since playback introduces a second owner of the codec handle.
+
+---
+
+## Capture review page
 
 A deliberately small Next.js app whose only job is to answer one question:
-**what did the ESP32-S3-BOX-3 actually record?**
+**what did the ESP32-S3-BOX-3 actually record?** It is now a debugging tool
+rather than part of the pipeline.
+
+> ⚠️ **The `peak` metric is misleading.** Every capture opens with a
+> full-scale codec transient in the first ~50 ms, so `peak` reports that
+> spike rather than the speech — clean table-distance speech reads
+> `peak 100% clipping`. Since it is pinned at full scale regardless of gain,
+> it cannot be used to compare gain settings. Fix: compute peak and the
+> clipping flag excluding the first 50 ms. (`brain/speech.py` already trims
+> that window before transcribing.)
+
+> ⚠️ `GET /api/captures` appears to be cached at the edge — a freshly posted
+> clip can be missing from the API response while showing correctly on the
+> page after a hard refresh. Trust the page, not the API.
 
 The board POSTs a clip after a voice trigger; this page lists the clips newest
 first with a waveform, a player, and the numbers that matter when a voice
