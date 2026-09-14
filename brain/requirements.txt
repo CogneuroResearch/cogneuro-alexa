@@ -1,0 +1,6 @@
+requests>=2.32
+python-dotenv>=1.0
+
+# Then install the SDK for whichever provider LLM_PROVIDER names:
+#   pip install anthropic
+#   pip install openai

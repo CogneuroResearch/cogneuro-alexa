@@ -1,0 +1,10 @@
+# Everything in requirements.txt, plus the Pi-side speech stack.
+-r requirements.txt
+
+flask>=3.0
+waitress>=3.0
+faster-whisper>=1.0
+piper-tts>=1.2
+
+# Also needed, via apt rather than pip:
+#   sudo apt install -y ffmpeg

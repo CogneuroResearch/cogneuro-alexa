@@ -12,3 +12,9 @@ firmware/**/build/
 firmware/**/managed_components/
 firmware/**/sdkconfig
 firmware/**/sdkconfig.old
+.env*
+!.env.example
+!**/.env.example
+__pycache__/
+*.pyc
+.venv/
