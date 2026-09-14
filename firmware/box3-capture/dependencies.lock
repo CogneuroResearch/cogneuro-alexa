@@ -167,6 +167,16 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 2.1.0~1
+  espressif/mdns:
+    component_hash: 459eef3d6fc4a224c7fdac2943233daa67e2c6588459177cb2414af586fb8700
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.13.0
   espressif/sensor_hub:
     component_hash: ea30db551c34aee2862482abf8b3164dd3855ecb4b4659b1e6878455c9cb9e22
     dependencies:
@@ -200,7 +210,8 @@ direct_dependencies:
 - espressif/button
 - espressif/esp-box-3
 - espressif/esp_codec_dev
+- espressif/mdns
 - idf
-manifest_hash: 09d5c0eeb2b469d760daeeeb770ab1b301c5f432c9149ef292a61b2a3154a7cc
+manifest_hash: a93605ba1b1b35af4c87acfa24a86543e4da60f007a4f2860dd2f80bf25509ec
 target: esp32s3
 version: 2.0.0
