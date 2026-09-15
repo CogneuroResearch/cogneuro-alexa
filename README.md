@@ -21,8 +21,8 @@ and the traps.
 
 ```
 ESP32-S3-BOX-3                     Raspberry Pi 5 (one process)
-  button (wake word later)  --HTTP-->  Whisper base.en
-  records audio                        conversation loop + tool calling
+  "Hey Nova" or button      --HTTP-->  Whisper base.en
+  records until you stop               conversation loop + tool calling
   plays the reply           <--PCM---  Piper
                                           |
                                        LLM API (provider-abstracted)
@@ -37,13 +37,17 @@ it would mean running HA purely as a transport.
 
 ## Status
 
-Working: capture firmware, mic calibration, the conversation loop with tool
-calling, and the full audio pipeline on the Pi (speech in, speech out).
+**It works.** Say "Hey Nova", ask a question, hear the answer — wake word and
+endpointing on the board, speech and reasoning on the Pi, nothing in the
+cloud but the LLM API.
 
-Next: point the firmware at the Pi and add playback, then endpointing (VAD)
-so a turn ends when you stop talking, then the on-device wake word. The
-codec-ownership bug in the firmware should be fixed *before* playback is
-added, since playback introduces a second owner of the codec handle.
+Done: capture firmware, mic calibration, the conversation loop with tool
+calling, Whisper and Piper on the Pi, streamed playback, the on-device wake
+word, and voice-activity endpointing so a turn ends when you stop talking.
+
+Next: enable the Linear tools (they are written and withheld only because no
+API key is set), speaker recognition to tell one person from another, and
+barge-in. See `brain/README.md` for the full list.
 
 ---
 

@@ -183,10 +183,64 @@ through the esp-sr AFE is the real fix, and lands with the wake word.
 
 4. **Only channel 0 is used.** See the gain note above.
 
+## menuconfig settings that sdkconfig.defaults will NOT give you
+
+`sdkconfig.defaults` is only read when there is no `sdkconfig` yet. An
+existing checkout keeps its old values silently, and the failure always looks
+like something else. Each of these cost a build-and-flash cycle to find:
+
+| Setting | Where | Symptom if missed |
+|---|---|---|
+| Custom partition table CSV | Partition Table | `app partition is too small ... size 0x177000` |
+| `LWIP_DNS_SUPPORT_MDNS_QUERIES` | Component config → LWIP → DNS | cannot resolve `cogneuro-pi.local` |
+| A WakeNet model | ESP Speech Recognition → Load Multiple Wake Words | `no models in the 'model' partition` |
+| `ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1` **off** | ESP System Settings → Watchdogs | watchdog backtrace in WakeNet during playback |
+
+If in doubt, delete `sdkconfig` and let the defaults regenerate — but note
+that also wipes your WiFi credentials and device key, which live there.
+
+## Wake word
+
+`Hey Nova` (`wn10_heynova`), selected under ESP Speech Recognition → Load
+Multiple Wake Words (WakeNet9 or WakeNet10).
+
+The list has three tiers worth knowing: `wn10_` models are the newest
+generation (only two English ones — `Hey,Hermes` and `Hey,Nova`); plain
+`wn9_` models are properly trained (`Alexa`, `Hi,ESP`); and `wn9_..._tts`
+models are trained on synthesised speech and are generally weaker in a real
+room. `Alexa` works well but sets off any Echo within earshot.
+
+Each enabled model costs flash and CPU on every frame, so enable one.
+
+## Architecture: one owner of the microphone
+
+`audio_pipeline.c` owns the mic. Nothing else may read the codec.
+
+WakeNet has to see every frame, so the AFE reads continuously; a second
+reader in `capture_main.c` would be the first bug you hit. Both triggers —
+the wake word and the buttons — call `audio_pipeline_trigger()` and do the
+same thing. Utterances come back to `capture_main.c` by callback, on a worker
+task, so blocking there for the network round trip and playback is fine.
+
+The AFE pipeline is `[input] -> SE(BSS) -> VAD(WebRTC) -> WakeNet -> [output]`:
+both microphones in, beamformed, one clean channel out. `extract_channel0()`
+is gone.
+
+Endpointing: an utterance ends after `CAPTURE_TRAILING_SILENCE_MS` (700ms) of
+silence, once at least `CAPTURE_MIN_SPEECH_MS` (300ms) of speech has been
+seen, capped at `CAPTURE_MAX_SECONDS`. The minimum matters — without it a
+cough or the button click itself ends the utterance and Whisper gets nothing.
+
+**Task placement is load-bearing.** Feed runs on core 0, fetch on core 1.
+Both on core 1 starved that core's idle task and tripped the task watchdog
+during playback. Splitting is most of the fix; core 1 is still legitimately
+near-saturated by inference on every 32ms frame, which is why the CPU1 idle
+watchdog check is disabled.
+
 ## Next: talk to the Pi
 
-The board currently POSTs to the Vercel review page, which was only ever an
-input-inspection harness. The pipeline now lives on the Pi:
+Done — assistant mode is the default path now. The review page remains under
+a menuconfig switch for judging raw input. The wire format:
 
 ```
 POST http://cogneuro-pi.local:8080/talk?stream=1
