@@ -151,8 +151,6 @@ class Speaker:
         self.model_path = Path(model).expanduser()
         if not self.model_path.exists():
             raise RuntimeError(f"Piper voice not found: {self.model_path}")
-        if shutil.which(self.binary) is None:
-            raise RuntimeError(f"Piper binary not on PATH: {self.binary}")
         self.sample_rate = sample_rate
 
         # Delivery controls. length_scale is duration: >1 slower, <1 faster.
@@ -175,6 +173,17 @@ class Speaker:
         self._native_rate: int | None = None
         if os.environ.get("PIPER_USE_CLI", "0") != "1":
             self._load_voice()
+
+        # The CLI is only a fallback now, so its absence is fatal only when
+        # the in-process voice did not load. Requiring it unconditionally
+        # meant TTS silently disabled itself under systemd, where PATH does
+        # not include the venv's bin directory — the assistant came up mute
+        # with one warning line to show for it.
+        if self._voice is None and shutil.which(self.binary) is None:
+            raise RuntimeError(
+                f"no in-process Piper voice and no {self.binary} on PATH "
+                f"(PATH={os.environ.get('PATH', '')})"
+            )
 
     def _load_voice(self) -> None:
         """Load the voice once, if this Piper build exposes a usable API."""

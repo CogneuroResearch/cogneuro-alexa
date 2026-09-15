@@ -22,6 +22,7 @@ llm/
   openai_provider.py
 
 setup_pi.sh        one-shot Pi provisioning (idempotent)
+install_service.sh install as a systemd unit so it survives a closed terminal
 verify.py          pre-flight checks, one layer at a time
 smoke_test.py      16 offline tests — no keys, no network
 bench_whisper.py   benchmark Whisper models on real captured audio
@@ -54,6 +55,20 @@ source ~/alexa-venv/bin/activate && cd ~/brain && python server.py
 Startup takes ~15s the first time (Whisper loads), ~3s after. You want to
 see `whisper ready`, `piper voice loaded in-process`, `acknowledgements
 ready`, then `listening on 0.0.0.0:8080`.
+
+### Run it as a service
+
+Running it by hand means it dies with the terminal, which is a poor property
+for something in a kitchen.
+
+```bash
+~/brain/install_service.sh
+```
+
+Then `journalctl -u alexa -f` to watch it, and
+`sudo systemctl restart alexa` after deploying new code. It starts at boot
+and restarts on failure, with a burst limit so a crash loop cannot hammer
+the LLM API.
 
 > **The server window is not a shell.** Typing `python server.py` into a
 > running server just echoes it. Press `Ctrl-C`, wait for the prompt, *then*
