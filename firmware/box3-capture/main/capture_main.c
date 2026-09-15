@@ -1,9 +1,14 @@
 /*
  * ESP32-S3-BOX-3 capture firmware.
  *
- * Press a button, record a fixed window from the mic array, POST it to the
- * review page. Nothing else. This exists so the raw input can be judged before
- * any of it is transcribed or acted on.
+ * Say the wake word or press a button, and the board records until you stop
+ * talking, sends the utterance to the assistant on the Pi, and plays the
+ * spoken reply.
+ *
+ * The microphone itself belongs to audio_pipeline.c, which runs the AFE
+ * continuously — beamforming both mics, listening for the wake word, and
+ * detecting when speech ends. This file owns the network side and the
+ * speaker, and is handed finished utterances by callback.
  *
  * The audio path goes through Espressif's BSP for the board: the BOX-3's
  * microphones hang off an ES7210 ADC that has to be configured over I2C before
@@ -17,7 +22,6 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #include "freertos/event_groups.h"
 
 #include "esp_log.h"
@@ -37,24 +41,21 @@
 #include "esp_codec_dev.h"
 #include "iot_button.h"
 
-#include "wake_word.h"
+#include "audio_pipeline.h"
 
 static const char *TAG = "capture";
 
 #define SAMPLE_RATE     CONFIG_CAPTURE_SAMPLE_RATE
-#define CAPTURE_SECONDS CONFIG_CAPTURE_SECONDS
 #define MIC_CHANNELS    CONFIG_CAPTURE_MIC_CHANNELS
 #define FIRMWARE_VERSION "0.1.0"
 
 #define WIFI_CONNECTED_BIT BIT0
 
 static EventGroupHandle_t s_wifi_events;
-static SemaphoreHandle_t s_capture_request;
 static esp_codec_dev_handle_t s_mic;
 #if CONFIG_CAPTURE_ASSISTANT_MODE
 static esp_codec_dev_handle_t s_speaker;
 #endif
-static const char *s_trigger = "button";
 
 /* ------------------------------------------------------------------ WiFi */
 
@@ -151,31 +152,13 @@ static esp_err_t mic_start(void)
     return ESP_OK;
 }
 
-static esp_err_t record(int16_t *dst, size_t frames)
-{
-    /* esp_codec_dev_read blocks until the buffer is full, so one call is the
-     * whole window. Reading in chunks would only add places to go wrong. */
-    int bytes = (int)(frames * MIC_CHANNELS * sizeof(int16_t));
-    esp_err_t err = esp_codec_dev_read(s_mic, dst, bytes);
-    if (err != ESP_OK) ESP_LOGE(TAG, "codec read failed: %s", esp_err_to_name(err));
-    return err;
-}
-
-/* Take channel 0 out of the interleaved stream, in place. */
-static void extract_channel0(int16_t *buf, size_t frames)
-{
-    for (size_t i = 0; i < frames; i++) {
-        buf[i] = buf[i * MIC_CHANNELS];
-    }
-}
-
 #if !CONFIG_CAPTURE_ASSISTANT_MODE
-static void post_capture(const int16_t *pcm, size_t bytes, int channels)
+static void post_capture(const int16_t *pcm, size_t bytes, int channels, const char *trigger)
 {
     char url[320];
     snprintf(url, sizeof(url),
              "%s?device=box3&trigger=%s&sr=%d&ch=%d&bits=16&rssi=%d&fw=%s",
-             CONFIG_CAPTURE_ENDPOINT, s_trigger, SAMPLE_RATE, channels,
+             CONFIG_CAPTURE_ENDPOINT, trigger, SAMPLE_RATE, channels,
              current_rssi(), FIRMWARE_VERSION);
 
     esp_http_client_config_t cfg = {
@@ -452,55 +435,37 @@ static void exchange_with_assistant(const int16_t *pcm, size_t bytes)
 
 #endif /* CONFIG_CAPTURE_ASSISTANT_MODE */
 
-static void capture_task(void *arg)
-{
-    const size_t frames = (size_t)SAMPLE_RATE * CAPTURE_SECONDS;
-    const size_t raw_bytes = frames * MIC_CHANNELS * sizeof(int16_t);
+/* ------------------------------------------------------------- Utterance */
 
-    int16_t *buf = heap_caps_malloc(raw_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!buf) {
-        ESP_LOGE(TAG, "could not allocate %u bytes in PSRAM", (unsigned)raw_bytes);
-        vTaskDelete(NULL);
+/*
+ * Called by the audio pipeline once someone has finished speaking. Runs on a
+ * worker task, so blocking here for the round trip and the playback is fine —
+ * the AFE keeps feeding on its own tasks meanwhile.
+ */
+static void on_utterance(const int16_t *pcm, size_t samples, const char *trigger)
+{
+    if (!(xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT)) {
+        ESP_LOGW(TAG, "no WiFi, utterance dropped");
         return;
     }
-    ESP_LOGI(TAG, "ready: %d channels, %d Hz, %ds per capture (%u bytes)",
-             MIC_CHANNELS, SAMPLE_RATE, CAPTURE_SECONDS, (unsigned)raw_bytes);
 
-    while (true) {
-        xSemaphoreTake(s_capture_request, portMAX_DELAY);
-
-        if (!(xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT)) {
-            ESP_LOGW(TAG, "no WiFi, capture skipped");
-            continue;
-        }
-
-        ESP_LOGI(TAG, "recording %d seconds", CAPTURE_SECONDS);
-        if (record(buf, frames) != ESP_OK) continue;
-
-#if CONFIG_CAPTURE_SEND_MONO
-        extract_channel0(buf, frames);
-        const size_t send_bytes = frames * sizeof(int16_t);
-        const int send_channels = 1;
-#else
-        const size_t send_bytes = raw_bytes;
-        const int send_channels = MIC_CHANNELS;
-#endif
+    const size_t bytes = samples * sizeof(int16_t);
+    ESP_LOGI(TAG, "sending %.1fs (%u bytes, %s)",
+             (float)samples / SAMPLE_RATE, (unsigned)bytes, trigger);
 
 #if CONFIG_CAPTURE_ASSISTANT_MODE
-        (void)send_channels;
-        exchange_with_assistant(buf, send_bytes);
+    (void)trigger;
+    exchange_with_assistant(pcm, bytes);
 #else
-        post_capture(buf, send_bytes, send_channels);
+    post_capture(pcm, bytes, 1, trigger);
 #endif
-    }
 }
 
 /* --------------------------------------------------------------- Buttons */
 
 static void on_button(void *button_handle, void *usr_data)
 {
-    s_trigger = "button";
-    xSemaphoreGive(s_capture_request);
+    audio_pipeline_trigger("button");
 }
 
 static void buttons_start(void)
@@ -521,7 +486,7 @@ static void buttons_start(void)
         if (i == BSP_BUTTON_MAIN || btns[i] == NULL) continue;
         iot_button_register_cb(btns[i], BUTTON_SINGLE_CLICK, on_button, NULL);
     }
-    ESP_LOGI(TAG, "press either physical button to capture");
+    ESP_LOGI(TAG, "press either physical button to talk");
 }
 
 /* ------------------------------------------------------------------ Main */
@@ -538,8 +503,6 @@ void app_main(void)
     if (strlen(CONFIG_CAPTURE_DEVICE_KEY) == 0) {
         ESP_LOGE(TAG, "CAPTURE_DEVICE_KEY is empty; the server will reject every post");
     }
-
-    s_capture_request = xSemaphoreCreateBinary();
 
     wifi_start();
 
@@ -563,10 +526,9 @@ void app_main(void)
     ESP_LOGI(TAG, "assistant endpoint: %s", CONFIG_CAPTURE_ASSISTANT_ENDPOINT);
 #endif
 
-    xTaskCreate(capture_task, "capture", 6144, NULL, 5, NULL);
+    if (audio_pipeline_start(s_mic, on_utterance) != ESP_OK) {
+        ESP_LOGE(TAG, "audio pipeline failed to start");
+        return;
+    }
     buttons_start();
-
-#if CONFIG_CAPTURE_TRIGGER_WAKE_WORD
-    wake_word_start(s_capture_request, &s_trigger);
-#endif
 }

@@ -11,3 +11,6 @@ dependencies:
   # Requires CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES, set in sdkconfig.defaults.
   espressif/mdns:
     version: "^1"
+  # WakeNet (wake word) and the AFE (beamforming, noise suppression, VAD).
+  espressif/esp-sr:
+    version: "^2"

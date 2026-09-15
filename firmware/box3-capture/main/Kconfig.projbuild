@@ -20,10 +20,29 @@ menu "Capture firmware configuration"
         help
             Must match DEVICE_KEY on the server. Sent as the X-Device-Key header.
 
-    config CAPTURE_SECONDS
-        int "Seconds to record per capture"
-        default 5
+    config CAPTURE_MAX_SECONDS
+        int "Maximum seconds for one utterance"
+        default 12
         range 1 60
+        help
+            A safety cap, not the normal length. Utterances end when you stop
+            talking; this only bounds the buffer if endpointing never fires.
+
+    config CAPTURE_TRAILING_SILENCE_MS
+        int "Silence that ends an utterance (ms)"
+        default 700
+        range 200 3000
+        help
+            Shorter feels snappier but clips people who pause mid-sentence.
+            Longer is safer and adds that long to every single turn.
+
+    config CAPTURE_MIN_SPEECH_MS
+        int "Minimum speech before an utterance can end (ms)"
+        default 300
+        range 0 3000
+        help
+            Without this floor a cough, or the click of the button itself,
+            ends the utterance immediately and Whisper receives nothing.
 
     config CAPTURE_SAMPLE_RATE
         int "Sample rate (Hz)"
@@ -37,14 +56,6 @@ menu "Capture firmware configuration"
             The BOX-3's ES7210 exposes two microphones plus two echo-reference
             channels. Two is the pair of mics. If captures come back silent or
             sound like noise, this is the first knob to try.
-
-    config CAPTURE_SEND_MONO
-        bool "Extract channel 0 and send mono"
-        default y
-        help
-            The eventual Whisper pipeline wants mono, so this is the honest test.
-            Turn it off to send every channel interleaved and hear each mic
-            separately on the review page.
 
     config CAPTURE_MIC_GAIN_DB
         int "Microphone gain (dB)"
@@ -82,11 +93,14 @@ menu "Capture firmware configuration"
 
     config CAPTURE_TRIGGER_WAKE_WORD
         bool "Trigger captures with the on-device wake word"
-        default n
+        default y
         help
-            Scaffolding only, and deliberately off. See wake_word.c for the
-            integration points. Prove the button path first: if a capture looks
-            wrong with the wake word enabled, the mic, the gain, the endpointing
-            and the detector are all suspects at once.
+            The AFE runs either way — it provides the beamforming and the voice
+            activity detection that ends an utterance. This only controls
+            whether a wake-word detection also starts a capture.
+
+            Turn it off to fall back to button-only while keeping endpointing.
+
+            Select which wake word under: ESP Speech Recognition -> WakeNet.
 
 endmenu

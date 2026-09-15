@@ -1,0 +1,17 @@
+# ESP32-S3-BOX-3 (N16R8): 16MB flash.
+#
+# A custom table because esp-sr needs a partition literally named "model" to
+# hold srmodels.bin; CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE has no such
+# entry. Changing the table means the next flash must erase, not merge.
+#
+# The app gets 4MB. Linking the AFE and WakeNet took the binary from 1.0MB to
+# 2.4MB, which already overflows the 1.5MB that SINGLE_APP_LARGE allowed; 3MB
+# would fit but leaves only 20% headroom before MultiNet or anything else.
+# 4MB for models is far more than one wake word needs. Flash is the resource
+# this board has to spare, and resizing later means another full erase.
+#
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+phy_init,   data, phy,      0xf000,   0x1000
+factory,    app,  factory,  0x10000,  0x400000
+model,      data, spiffs,   ,         0x400000

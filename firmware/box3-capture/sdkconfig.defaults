@@ -14,8 +14,14 @@ CONFIG_ESP_TLS_INSECURE=n
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Default 1MB app partition overflows; the N16R8 has 16MB flash.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Custom table: esp-sr needs a partition named "model". See partitions.csv.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # Resolve .local names (cogneuro-pi.local) through mDNS rather than DNS.
 CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y
+
+# WakeNet inference runs on every 32ms frame, so core 1 is legitimately busy
+# almost all the time and its idle task cannot feed the watchdog. Expected for
+# always-on audio; without this the watchdog trips during playback.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
